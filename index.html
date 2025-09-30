@@ -608,36 +608,23 @@
         // --- INITIALIZATION ---
 
         window.onload = async () => {
-            // Check if we are using the placeholder config (which is now replaced with a real key)
-            // The previous check was for "YOUR_API_KEY". We can keep the error state check simple
-            // by relying on the internal environment check first.
-            if (firebaseConfig.apiKey === "YOUR_API_KEY") {
-                document.getElementById('menu-loading').classList.add('hidden');
-                document.getElementById('menu-content').classList.remove('hidden');
-                document.getElementById('menu-content').innerHTML = `
-                    <p class="text-center text-red-700 font-bold p-8">
-                        Initialization Failed: Missing Firebase Configuration.
-                    </p>
-                    <p class="text-center text-stone-600 text-sm mt-2">
-                        You must replace the placeholder keys in the script with your actual Firebase project settings 
-                        to run the app outside of the Canvas environment.
-                    </p>
-                `;
-                document.getElementById('status-message').textContent = 'Error: Config missing.';
-                return;
-            }
+            
+            // Check if we are using the real config (no placeholder check needed since config is provided)
 
             try {
+                // Initialize Firebase services
                 app = initializeApp(firebaseConfig);
                 db = getFirestore(app);
                 auth = getAuth(app);
 
+                // Authenticate (using custom token if provided, otherwise anonymously)
                 if (initialAuthToken) {
                     await signInWithCustomToken(auth, initialAuthToken);
                 } else {
                     await signInAnonymously(auth);
                 }
 
+                // Listen for authentication state changes
                 onAuthStateChanged(auth, (user) => {
                     // Always remove loading state and show buttons once authentication check is done
                     document.getElementById('menu-loading').classList.add('hidden');
@@ -668,6 +655,7 @@
                         renderView('menu');
                         
                     } else {
+                        // User not authenticated (shouldn't happen with signInAnonymously unless network fail)
                         document.getElementById('status-message').textContent = 'Authentication Failed.';
                         document.getElementById('menu-loading').classList.add('hidden');
                         document.getElementById('menu-content').innerHTML = '<p class="text-center text-red-700 font-bold p-8">Authentication Failed. Please try again.</p>';
@@ -675,10 +663,27 @@
                 });
 
             } catch (e) {
-                console.error("Initialization Error:", e);
-                document.getElementById('status-message').textContent = 'Initialization Failed: Check console for details.';
-                document.getElementById('menu-loading').innerHTML = '<p class="text-lg font-semibold text-red-700">Critical Error: Cannot initialize application.</p>';
+                // --- CRITICAL DEBUGGING SECTION (NEW) ---
+                console.error("CRITICAL APP INITIALIZATION FAILURE:", e);
+                
+                const errorMessage = e.message || 'Unknown initialization error. Check browser console.';
+                const errorName = e.code ? `(${e.code})` : '';
+
+                // Display the specific error message prominently
+                document.getElementById('status-message').textContent = `ERROR: Initialization Failed ${errorName}`;
+                document.getElementById('menu-loading').innerHTML = `
+                    <p class="text-lg font-semibold text-red-700">Initialization Failed ${errorName}</p>
+                    <p class="text-sm text-red-600 mt-2 p-3 bg-red-100 rounded-lg border border-red-300 overflow-auto whitespace-normal">
+                        <strong>Detail:</strong> ${errorMessage}
+                    </p>
+                    <p class="text-xs text-stone-600 mt-3">
+                        This usually indicates an issue with API Key restrictions or Authentication Domain setup in your Firebase Project.
+                        Please check the browser console for the full error stack.
+                    </p>
+                `;
+                document.getElementById('menu-loading').classList.remove('hidden');
                 document.getElementById('menu-content').classList.add('hidden');
+                // ----------------------------------------
             }
         };
     </script>
