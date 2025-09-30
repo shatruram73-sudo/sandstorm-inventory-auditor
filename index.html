@@ -640,16 +640,40 @@
                 console.error("Failed to parse __firebase_config:", e);
             }
             
-            // Check for required configuration (the API key is inside firebaseConfig)
+            // --- HARDCODED FALLBACK CONFIGURATION FOR GITHUB DEPLOYMENT ---
+            // IMPORTANT: If you are running this directly from a local file or GitHub, 
+            // the environment variables will be missing. You MUST uncomment and replace 
+            // the placeholder values below with your actual Firebase project configuration 
+            // to make the application function outside the Canvas environment.
+            // WARNING: DO NOT COMMIT REAL, SENSITIVE API KEYS TO A PUBLIC GITHUB REPO!
             if (!firebaseConfig || !firebaseConfig.apiKey) {
+                console.warn("Environment config missing. Using local fallback.");
+                firebaseConfig = {
+                    apiKey: "AIzaSyBRkM6e0bYJCjM9ZsQs_g-G971oQ0NkolQ",
+  		    authDomain: "sandstorm-inventory-auditor.firebaseapp.com",
+  		    projectId: "sandstorm-inventory-auditor",
+  		    storageBucket: "sandstorm-inventory-auditor.firebasestorage.app",
+  		    messagingSenderId: "251619777957",
+  		    appId: "1:251619777957:web:f3a09b3c346e1c40e01c4c",
+  		    measurementId: "G-THR73FJ9EN"
+                };
+            }
+            // --- END HARDCODED FALLBACK ---
+
+            // Check for required configuration (the API key is inside firebaseConfig)
+            const apiKeyMissingOrPlaceholder = !firebaseConfig || 
+                                               !firebaseConfig.apiKey || 
+                                               firebaseConfig.apiKey === "YOUR_FIREBASE_API_KEY";
+            
+            if (apiKeyMissingOrPlaceholder) {
                 // If config is missing, display the error directly on the loading screen
                 const loadingElement = document.getElementById('menu-loading');
                 loadingElement.classList.remove('hidden');
                 document.getElementById('menu-content').classList.add('hidden');
                 loadingElement.innerHTML = `
-                    <p class="text-lg font-semibold text-red-700">Initialization Failed: API Key Missing</p>
-                    <p class="text-sm text-red-600 mt-2 p-3 bg-red-100 rounded-lg border border-red-300">
-                        <strong>Detail:</strong> The required Firebase configuration (API Key) was not found or was invalid.
+                    <p class="text-lg font-semibold text-red-700">Initialization Failed: Firebase Config Missing</p>
+                    <p class="text-sm text-red-600 mt-2 p-3 bg-red-100 rounded-lg border border-red-300 overflow-auto whitespace-normal">
+                        <strong>Detail:</strong> When running on GitHub/locally, you must replace the placeholder keys in the script with your own Firebase project configuration.
                     </p>
                 `;
                 console.error("CRITICAL APP INITIALIZATION FAILURE: Firebase Config is missing or invalid.");
