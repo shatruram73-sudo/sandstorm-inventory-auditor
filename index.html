@@ -8,7 +8,7 @@
     
     <!-- 
         *** PROGRESSIVE WEB APP (PWA) CONFIGURATION ***
-        These lines tell the mobile browser how to install and run the app.
+        (Note: You still need manifest.json and service-worker.js for full PWA features)
     -->
     <link rel="manifest" href="/manifest.json">
     <meta name="apple-mobile-web-app-capable" content="yes">
@@ -29,6 +29,7 @@
 
         // Global variables for Firebase state and app data
         let app, db, auth, userId = null;
+        let appId = null; // <-- FIX: Declared globally so functions like loadLocations can access it
         let rawScans = []; 
         let currentSnapshotUnsubscribe = null; 
         let currentView = 'menu'; // 'menu', 'audit', or 'manage-locations'
@@ -37,32 +38,6 @@
 
         let customLocations = [];
         const defaultLocations = ['WAREHOUSE_A', 'STORE_101', 'OUTLET_NYC', 'STORAGE_B'];
-
-        // --- Configuration for Standalone Deployment (GitHub Pages, etc.) ---
-        // Replace these placeholder values with YOUR actual Firebase project config 
-        // if running outside of the Canvas environment.
-        const STANDALONE_FIREBASE_CONFIG = {
-            apiKey: "AIzaSyBRkM6e0bYJCzM9ZsQs_g-971oQ0NkolQ", 
-            authDomain: "sandstorm-inventory-auditor.firebaseapp.com", 
-            projectId: "sandstorm-inventory-auditor", 
-            storageBucket: "sandstorm-inventory-auditor.firebasestorage.app", 
-            messagingSenderId: "251619777957", 
-            appId: "1:251619777957:web:f3a09b3c346e1c40e01c4c"
-        };
-        // ---------------------------------------------------------------------
-
-        // --- Global Variables provided by Canvas Environment (used for deployment) ---
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-        
-        let firebaseConfig = STANDALONE_FIREBASE_CONFIG;
-        // Check if the environment provides a config (Canvas environment)
-        if (typeof __firebase_config !== 'undefined' && Object.keys(JSON.parse(__firebase_config)).length > 0) {
-            // Use environment config if available
-            firebaseConfig = JSON.parse(__firebase_config);
-        }
-
-        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
-        // -----------------------------------------------------------------------------
 
         setLogLevel('Debug'); // Enable Firestore logging
 
@@ -111,7 +86,8 @@
          * Fetches custom locations from Firestore and sets up a real-time listener.
          */
         const loadLocations = () => {
-            if (!db || !userId) return;
+            if (!db || !userId || !appId) return; // Added !appId check
+
             // Path: /artifacts/{appId}/users/{userId}/config/locations_list
             const configDocRef = doc(db, 
                 `artifacts/${appId}/users/${userId}/config`,
@@ -191,7 +167,7 @@
          * Saves a new location entered by the user to Firestore.
          */
         window.handleSaveNewLocation = async () => {
-            if (!db || !userId) return;
+            if (!db || !userId || !appId) return;
 
             const input = document.getElementById('new-location-input');
             let newLocation = input.value.trim();
@@ -277,7 +253,7 @@
          * Executes the actual deletion from Firestore (Config + Audit Data).
          */
         const executeLocationDeletion = async (locationId) => {
-            if (!db || !userId) return;
+            if (!db || !userId || !appId) return;
 
             // 1. Attempt to delete the Audit Data (Raw Scans)
             const auditDocRef = doc(db, 
@@ -391,7 +367,7 @@
                 renderInventory(); // Update UI immediately
             }
 
-            if (!db || !userId || !locationId) {
+            if (!db || !userId || !locationId || !appId) { // Added !appId check
                 document.getElementById('status-message').textContent = 'Waiting for location and auth...';
                 return;
             }
@@ -403,7 +379,7 @@
 
             currentSnapshotUnsubscribe = onSnapshot(docRef, (docSnap) => {
                 if (docSnap.exists()) {
-                    // Use JSON.parse if scans were stringified, but they are simple objects here.
+                    // Raw scans are stored as an array of objects
                     rawScans = docSnap.data().rawScans || []; 
                 } else {
                     rawScans = [];
@@ -432,7 +408,7 @@
          * Saves the current raw scan array state back to Firestore.
          */
         const saveInventory = async () => {
-            if (!db || !userId) {
+            if (!db || !userId || !appId) {
                 console.error("Database or User not initialized.");
                 return;
             }
@@ -631,7 +607,7 @@
             }, 1000); 
         };
         
-        // --- INITIALIZATION ---
+        // --- INITIALIZATION (CRITICAL FIX FOR API KEY ERROR APPLIED HERE) ---
 
         // Register the Service Worker for PWA/Offline support
         if ('serviceWorker' in navigator) {
@@ -649,8 +625,40 @@
 
         window.onload = async () => {
             
+            // --- MANDATORY VARIABLE ACCESS (ROBUST CHECK) ---
+            // FIX: Assign to the globally declared 'appId' variable instead of declaring a local 'const'
+            appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'; 
+            const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+            
+            let firebaseConfig = null;
             try {
-                // Initialize Firebase services
+                if (typeof __firebase_config !== 'undefined') {
+                    // This is the CRITICAL line: parse the JSON string provided by the environment
+                    firebaseConfig = JSON.parse(__firebase_config);
+                }
+            } catch (e) {
+                console.error("Failed to parse __firebase_config:", e);
+            }
+            
+            // Check for required configuration (the API key is inside firebaseConfig)
+            if (!firebaseConfig || !firebaseConfig.apiKey) {
+                // If config is missing, display the error directly on the loading screen
+                const loadingElement = document.getElementById('menu-loading');
+                loadingElement.classList.remove('hidden');
+                document.getElementById('menu-content').classList.add('hidden');
+                loadingElement.innerHTML = `
+                    <p class="text-lg font-semibold text-red-700">Initialization Failed: API Key Missing</p>
+                    <p class="text-sm text-red-600 mt-2 p-3 bg-red-100 rounded-lg border border-red-300">
+                        <strong>Detail:</strong> The required Firebase configuration (API Key) was not found or was invalid.
+                    </p>
+                `;
+                console.error("CRITICAL APP INITIALIZATION FAILURE: Firebase Config is missing or invalid.");
+                return; // STOP EXECUTION
+            }
+            // --- END MANDATORY VARIABLE ACCESS ---
+
+            try {
+                // Initialize Firebase services using the parsed, validated config
                 app = initializeApp(firebaseConfig);
                 db = getFirestore(app);
                 auth = getAuth(app);
@@ -705,25 +713,20 @@
                 });
 
             } catch (e) {
-                // --- CRITICAL DEBUGGING SECTION ---
+                // Handle late-stage initialization errors (e.g., setPersistence failure)
                 console.error("CRITICAL APP INITIALIZATION FAILURE:", e);
                 
                 const errorMessage = e.message || 'Unknown initialization error. Check browser console.';
                 const errorName = e.code ? `(${e.code})` : '';
 
-                // Display the specific error message prominently
-                document.getElementById('status-message').textContent = `ERROR: Initialization Failed ${errorName}`;
+                document.getElementById('menu-loading').classList.remove('hidden');
+                document.getElementById('menu-content').classList.add('hidden');
                 document.getElementById('menu-loading').innerHTML = `
                     <p class="text-lg font-semibold text-red-700">Initialization Failed ${errorName}</p>
                     <p class="text-sm text-red-600 mt-2 p-3 bg-red-100 rounded-lg border border-red-300 overflow-auto whitespace-normal">
                         <strong>Detail:</strong> ${errorMessage}
                     </p>
-                    <p class="text-xs text-stone-600 mt-3">
-                        **Action:** Check that your Firebase **apiKey** and **authDomain** are 100% correct in the config settings.
-                    </p>
                 `;
-                document.getElementById('menu-loading').classList.remove('hidden');
-                document.getElementById('menu-content').classList.add('hidden');
             }
         };
     </script>
