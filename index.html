@@ -21,7 +21,7 @@
     <!-- Firebase Imports -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, setPersistence, browserSessionPersistence } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, doc, onSnapshot, setDoc, setLogLevel, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // Global variables
@@ -36,9 +36,9 @@
         const defaultLocations = ['Warehouse_A', 'Store_101', 'Outlet_NYC', 'Storage_B'];
 
         // --- Configuration for Standalone Deployment (GitHub Pages, etc.) ---
-        // This configuration object has been updated with your provided Firebase project settings.
+        // This config is used if running outside of the Canvas environment.
         const STANDALONE_FIREBASE_CONFIG = {
-            apiKey: "AIzaSyBRkM6e0bYJCjM9ZsQs_g-G971oQ0NkolQ", 
+            apiKey: "AIzaSyBRkM6e0bYJCjM9ZsQs_g-971oQ0NkolQ", 
             authDomain: "sandstorm-inventory-auditor.firebaseapp.com", 
             projectId: "sandstorm-inventory-auditor", 
             storageBucket: "sandstorm-inventory-auditor.firebasestorage.app", 
@@ -609,19 +609,28 @@
 
         window.onload = async () => {
             
-            // Check if we are using the real config (no placeholder check needed since config is provided)
-
             try {
+                // Debugging: Log the config being used.
+                console.log("--- DEBUG: Firebase Config in use ---");
+                console.log(firebaseConfig);
+                console.log("Auth Domain:", firebaseConfig.authDomain);
+                console.log("---------------------------------------");
+
                 // Initialize Firebase services
                 app = initializeApp(firebaseConfig);
                 db = getFirestore(app);
                 auth = getAuth(app);
+                
+                // Set persistence for the auth session
+                await setPersistence(auth, browserSessionPersistence);
 
                 // Authenticate (using custom token if provided, otherwise anonymously)
                 if (initialAuthToken) {
                     await signInWithCustomToken(auth, initialAuthToken);
+                    console.log("Signed in with custom token.");
                 } else {
                     await signInAnonymously(auth);
+                    console.log("Signed in anonymously.");
                 }
 
                 // Listen for authentication state changes
@@ -655,15 +664,15 @@
                         renderView('menu');
                         
                     } else {
-                        // User not authenticated (shouldn't happen with signInAnonymously unless network fail)
-                        document.getElementById('status-message').textContent = 'Authentication Failed.';
+                        // User not authenticated 
+                        document.getElementById('status-message').textContent = 'Authentication Failed (User is null).';
                         document.getElementById('menu-loading').classList.add('hidden');
-                        document.getElementById('menu-content').innerHTML = '<p class="text-center text-red-700 font-bold p-8">Authentication Failed. Please try again.</p>';
+                        document.getElementById('menu-content').innerHTML = '<p class="text-center text-red-700 font-bold p-8">Authentication Failed. Please check network and console.</p>';
                     }
                 });
 
             } catch (e) {
-                // --- CRITICAL DEBUGGING SECTION (NEW) ---
+                // --- CRITICAL DEBUGGING SECTION (Updated) ---
                 console.error("CRITICAL APP INITIALIZATION FAILURE:", e);
                 
                 const errorMessage = e.message || 'Unknown initialization error. Check browser console.';
@@ -677,8 +686,8 @@
                         <strong>Detail:</strong> ${errorMessage}
                     </p>
                     <p class="text-xs text-stone-600 mt-3">
-                        This usually indicates an issue with API Key restrictions or Authentication Domain setup in your Firebase Project.
-                        Please check the browser console for the full error stack.
+                        Since Anonymous Auth is enabled, this is highly likely due to a **mismatch in the 'authDomain' or 'apiKey'** in your config. 
+                        Please ensure the config in the Canvas environment matches your Firebase console exactly.
                     </p>
                 `;
                 document.getElementById('menu-loading').classList.remove('hidden');
