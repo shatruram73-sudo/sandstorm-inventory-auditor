@@ -35,9 +35,29 @@
         let customLocations = [];
         const defaultLocations = ['Warehouse_A', 'Store_101', 'Outlet_NYC', 'Storage_B'];
 
+        // --- Configuration for Standalone Deployment (GitHub Pages, etc.) ---
+        // This configuration object has been updated with your provided Firebase project settings.
+        const STANDALONE_FIREBASE_CONFIG = {
+            apiKey: "AIzaSyBRkM6e0bYJCjM9ZsQs_g-G971oQ0NkolQ", 
+            authDomain: "sandstorm-inventory-auditor.firebaseapp.com", 
+            projectId: "sandstorm-inventory-auditor", 
+            storageBucket: "sandstorm-inventory-auditor.firebasestorage.app", 
+            messagingSenderId: "251619777957", 
+            appId: "1:251619777957:web:f3a09b3c346e1c40e01c4c",
+            measurementId: "G-THR73FJ9EN" // Optional
+        };
+        // ---------------------------------------------------------------------
+
         // --- Global Variables provided by Canvas Environment ---
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        
+        let firebaseConfig = STANDALONE_FIREBASE_CONFIG;
+        // Check if the environment provides a config (meaning we are running in Canvas)
+        if (typeof __firebase_config !== 'undefined' && Object.keys(JSON.parse(__firebase_config)).length > 0) {
+            // Use environment config if available
+            firebaseConfig = JSON.parse(__firebase_config);
+        }
+
         const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
         // --------------------------------------------------------
 
@@ -588,15 +608,26 @@
         // --- INITIALIZATION ---
 
         window.onload = async () => {
+            // Check if we are using the placeholder config (which is now replaced with a real key)
+            // The previous check was for "YOUR_API_KEY". We can keep the error state check simple
+            // by relying on the internal environment check first.
+            if (firebaseConfig.apiKey === "YOUR_API_KEY") {
+                document.getElementById('menu-loading').classList.add('hidden');
+                document.getElementById('menu-content').classList.remove('hidden');
+                document.getElementById('menu-content').innerHTML = `
+                    <p class="text-center text-red-700 font-bold p-8">
+                        Initialization Failed: Missing Firebase Configuration.
+                    </p>
+                    <p class="text-center text-stone-600 text-sm mt-2">
+                        You must replace the placeholder keys in the script with your actual Firebase project settings 
+                        to run the app outside of the Canvas environment.
+                    </p>
+                `;
+                document.getElementById('status-message').textContent = 'Error: Config missing.';
+                return;
+            }
+
             try {
-                if (Object.keys(firebaseConfig).length === 0) {
-                     document.getElementById('status-message').textContent = 'Error: Firebase config missing.';
-                     // Still show menu content but disabled? For now, just show the loading message.
-                     document.getElementById('menu-loading').innerHTML = '<p class="text-lg font-semibold text-red-700">Initialization Failed: Missing Firebase Configuration.</p>';
-                     document.getElementById('status-message').textContent = 'Error: Firebase config missing.';
-                     return;
-                }
-                
                 app = initializeApp(firebaseConfig);
                 db = getFirestore(app);
                 auth = getAuth(app);
