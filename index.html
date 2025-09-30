@@ -1,0 +1,839 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SANDSTORM Kenya Inventory Auditor</title>
+    
+    <!-- 
+        *** STANDALONE MOBILE APP CONFIGURATION (PWA) ***
+        Ensure the app appears fullscreen and standalone when added to the home screen.
+    -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Auditor">
+    <meta name="theme-color" content="#451a03"> <!-- Matches header background (amber-900) -->
+    
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Load Inter Font -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <!-- Firebase Imports -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, onSnapshot, setDoc, setLogLevel, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global variables
+        let app, db, auth, userId = null;
+        let rawScans = []; 
+        let currentSnapshotUnsubscribe = null; 
+        let currentView = 'menu'; // 'menu', 'audit', or 'manage-locations'
+        let clearConfirmationTimeout = null; 
+        let deleteConfirmationMap = {}; // Tracks two-tap confirmation state for location deletion
+
+        let customLocations = [];
+        const defaultLocations = ['Warehouse_A', 'Store_101', 'Outlet_NYC', 'Storage_B'];
+
+        // --- Global Variables provided by Canvas Environment ---
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        // --------------------------------------------------------
+
+        setLogLevel('Debug'); // Enable Firestore logging
+
+        // --- CORE UI/STATE MANAGEMENT ---
+
+        /**
+         * Switches the active view (screen) of the application.
+         * @param {string} viewName - 'menu', 'audit', or 'manage-locations'
+         */
+        const renderView = (viewName) => {
+            currentView = viewName;
+            document.querySelectorAll('.view-screen').forEach(el => el.classList.add('hidden'));
+
+            const menuButton = document.getElementById('menu-button');
+            const fixedFooter = document.getElementById('fixed-footer');
+
+            // Reset focus whenever switching view
+            document.activeElement.blur(); 
+
+            if (viewName === 'menu') {
+                document.getElementById('view-menu').classList.remove('hidden');
+                menuButton.classList.add('hidden');
+                fixedFooter.classList.add('hidden');
+            } else if (viewName === 'audit') {
+                document.getElementById('view-audit').classList.remove('hidden');
+                menuButton.classList.remove('hidden');
+                fixedFooter.classList.remove('hidden');
+                handleLocationChange(); // Ensure data loads for the selected location
+                document.getElementById('scan-input').focus();
+            } else if (viewName === 'manage-locations') {
+                document.getElementById('view-manage-locations').classList.remove('hidden');
+                menuButton.classList.remove('hidden');
+                fixedFooter.classList.add('hidden');
+                document.getElementById('new-location-input').focus();
+                renderLocationListForManagement(); // Render the list when navigating here
+            }
+        };
+        
+        window.navigate = renderView; // Expose to global scope for HTML buttons
+
+        // --- LOCATION MANAGEMENT ---
+
+        /**
+         * Fetches custom locations from Firestore and sets up a real-time listener.
+         */
+        const loadLocations = () => {
+            if (!db || !userId) return;
+            // Path: /artifacts/{appId}/users/{userId}/config/locations_list
+            const configDocRef = doc(db, 
+                `artifacts/${appId}/users/${userId}/config`,
+                'locations_list'
+            );
+            
+            // Setup snapshot listener for custom locations
+            onSnapshot(configDocRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    customLocations = docSnap.data().locations || [];
+                } else {
+                    customLocations = [];
+                }
+                populateLocationDropdown();
+                // If we are currently on the management screen, re-render the list
+                if (currentView === 'manage-locations') {
+                    renderLocationListForManagement();
+                }
+            });
+        };
+
+        /**
+         * Populates the location dropdown with default and custom locations.
+         */
+        const populateLocationDropdown = () => {
+            const select = document.getElementById('location-select');
+            const lastLocation = localStorage.getItem('lastLocation') || 'Warehouse_A';
+            
+            // Combine and deduplicate locations
+            const allLocations = [...new Set([...defaultLocations, ...customLocations])].sort();
+            
+            // Clear and repopulate
+            select.innerHTML = '';
+            allLocations.forEach(location => {
+                const option = document.createElement('option');
+                option.value = location;
+                // Replace underscores with spaces for readability
+                option.textContent = location.replace(/_/g, ' '); 
+                if (location === lastLocation) {
+                    option.selected = true;
+                }
+                select.appendChild(option);
+            });
+
+            // Re-initialize the listener for the currently selected location
+            setupInventoryListener(select.value);
+        };
+        
+        /**
+         * Renders the list of custom locations for management (deletion).
+         */
+        const renderLocationListForManagement = () => {
+            const container = document.getElementById('custom-location-list');
+            
+            // Only list custom locations, default locations cannot be deleted
+            const deletableLocations = customLocations;
+
+            if (deletableLocations.length === 0) {
+                container.innerHTML = '<p class="text-center text-stone-600 p-4 rounded-lg bg-amber-100">No custom locations added yet.</p>';
+                return;
+            }
+
+            container.innerHTML = deletableLocations.map(locationId => `
+                <div class="flex items-center justify-between p-3 bg-white rounded-lg shadow-md mb-2 border border-amber-200">
+                    <span class="font-semibold text-lg text-stone-800">${locationId.replace(/_/g, ' ')}</span>
+                    <button 
+                        onclick="handleDeleteClick('${locationId}', this)" 
+                        class="bg-red-700 hover:bg-red-800 text-white font-bold py-1 px-3 rounded-md transition duration-150 active:scale-95 text-sm"
+                    >
+                        Delete
+                    </button>
+                </div>
+            `).join('');
+        };
+
+        /**
+         * Saves a new location entered by the user to Firestore.
+         */
+        window.handleSaveNewLocation = async () => {
+            if (!db || !userId) return;
+
+            const input = document.getElementById('new-location-input');
+            let newLocation = input.value.trim();
+
+            if (!newLocation) {
+                showMessage('Location name cannot be empty.', 'bg-red-500');
+                return;
+            }
+            
+            // Sanitize and format the location ID (e.g., 'Aisle 5' -> 'AISLE_5')
+            newLocation = newLocation.replace(/\s+/g, '_').toUpperCase();
+
+            const allExistingLocations = [...defaultLocations, ...customLocations];
+            if (allExistingLocations.includes(newLocation)) {
+                showMessage(`Location ${newLocation.replace(/_/g, ' ')} already exists.`, 'bg-red-500');
+                input.value = '';
+                return;
+            }
+            
+            const updatedLocations = [...customLocations, newLocation].sort();
+            
+            const configDocRef = doc(db, 
+                `artifacts/${appId}/users/${userId}/config`,
+                'locations_list'
+            );
+            
+            try {
+                // Save the combined list of custom locations
+                await setDoc(configDocRef, { locations: updatedLocations }, { merge: false });
+                
+                showMessage(`Location ${newLocation.replace(/_/g, ' ')} added!`, 'bg-amber-600');
+                input.value = ''; // Clear input
+                
+                // Set the newly added location as the current selection
+                localStorage.setItem('lastLocation', newLocation);
+
+                renderView('audit'); // Go back to audit screen
+            } catch (e) {
+                console.error("Error saving new location:", e);
+                showMessage('Failed to save location.', 'bg-red-500');
+            }
+        };
+
+        /**
+         * Handles the two-tap confirmation for deleting a location.
+         * @param {string} locationId - The ID of the location to delete.
+         * @param {HTMLElement} buttonElement - The button clicked.
+         */
+        window.handleDeleteClick = async (locationId, buttonElement) => {
+            // Check if confirmation is already active for this ID
+            if (deleteConfirmationMap[locationId]) {
+                // Second click: Execute deletion
+                clearTimeout(deleteConfirmationMap[locationId]);
+                delete deleteConfirmationMap[locationId];
+                await executeLocationDeletion(locationId);
+            } else {
+                // First click: Request confirmation
+                const originalText = buttonElement.textContent;
+                buttonElement.textContent = 'CONFIRM DELETE?';
+                buttonElement.classList.remove('bg-red-700');
+                buttonElement.classList.add('bg-orange-600', 'animate-pulse');
+
+                // Clear any other active delete confirmations
+                Object.keys(deleteConfirmationMap).forEach(id => {
+                    if (id !== locationId) {
+                         clearTimeout(deleteConfirmationMap[id]);
+                         delete deleteConfirmationMap[id];
+                         // Reset the appearance of other buttons if necessary (omitted for simplicity/performance)
+                    }
+                });
+
+                // Set a timeout to reset the button state
+                const timeoutId = setTimeout(() => {
+                    buttonElement.textContent = originalText;
+                    buttonElement.classList.remove('bg-orange-600', 'animate-pulse');
+                    buttonElement.classList.add('bg-red-700');
+                    delete deleteConfirmationMap[locationId];
+                }, 4000); // 4 seconds to confirm
+
+                deleteConfirmationMap[locationId] = timeoutId;
+            }
+        };
+
+        /**
+         * Executes the actual deletion from Firestore (Config + Audit Data).
+         */
+        const executeLocationDeletion = async (locationId) => {
+            if (!db || !userId) return;
+
+            // 1. Attempt to delete the Audit Data (Raw Scans)
+            const auditDocRef = doc(db, 
+                `artifacts/${appId}/users/${userId}/inventory_audits`,
+                locationId
+            );
+            try {
+                // deleteDoc must be imported from firebase/firestore
+                await deleteDoc(auditDocRef);
+            } catch (e) {
+                console.warn(`Audit data for ${locationId} may not exist. Continuing...`, e);
+            }
+
+            // 2. Update the Locations List in Config
+            const updatedLocations = customLocations.filter(id => id !== locationId);
+            const configDocRef = doc(db, 
+                `artifacts/${appId}/users/${userId}/config`,
+                'locations_list'
+            );
+            
+            try {
+                // Overwrite the custom locations list without the deleted entry
+                await setDoc(configDocRef, { locations: updatedLocations }, { merge: false });
+                
+                showMessage(`Location ${locationId.replace(/_/g, ' ')} deleted!`, 'bg-red-700');
+                
+                // If the deleted location was the currently selected one, default back to Warehouse_A
+                if (document.getElementById('location-select').value === locationId) {
+                    localStorage.setItem('lastLocation', 'Warehouse_A');
+                }
+
+                // onSnapshot listener handles UI updates via loadLocations
+            } catch (e) {
+                console.error("Error deleting location from config:", e);
+                showMessage('Failed to delete location from configuration.', 'bg-red-500');
+            }
+        };
+
+        // --- INVENTORY AUDIT & FIREBASE SYNC (Existing Logic) ---
+
+        /**
+         * Converts the raw scans array into a consolidated inventory count map and array.
+         */
+        const getConsolidatedData = (scans) => {
+            const consolidatedMap = scans.reduce((acc, scan) => {
+                if (scan.sku) {
+                    acc[scan.sku] = (acc[scan.sku] || 0) + 1;
+                }
+                return acc;
+            }, {});
+
+            const consolidatedArray = Object.entries(consolidatedMap)
+                .map(([sku, count]) => ({ sku, count }))
+                .sort((a, b) => b.count - a.count);
+                
+            return { consolidatedMap, consolidatedArray };
+        };
+
+        /**
+         * Renders the consolidated inventory list to the UI.
+         */
+        const renderInventory = () => {
+            const container = document.getElementById('inventory-list');
+            const { consolidatedArray } = getConsolidatedData(rawScans);
+            const locationId = document.getElementById('location-select')?.value || 'N/A';
+            const displayLocation = locationId.replace(/_/g, ' ');
+            
+            // Update Clear Audit button state
+            const clearButton = document.getElementById('clear-audit-button');
+            if (clearButton) {
+                clearButton.textContent = rawScans.length > 0 ? `Clear Audit (${displayLocation})` : 'Audit Empty';
+                clearButton.disabled = rawScans.length === 0;
+                clearButton.classList.toggle('opacity-50', rawScans.length === 0);
+            }
+
+            if (consolidatedArray.length === 0) {
+                container.innerHTML = '<p class="text-center text-stone-500 py-4">Scan your first item to begin!</p>';
+                document.getElementById('total-items').textContent = 0;
+                document.getElementById('total-skus').textContent = 0;
+                return;
+            }
+
+            container.innerHTML = consolidatedArray.map(item => `
+                <div class="flex items-center justify-between p-3 bg-white rounded-lg shadow-md mb-2 border border-amber-200">
+                    <span class="font-mono text-lg text-stone-800">${item.sku}</span>
+                    <span class="text-xl font-bold text-amber-700">${item.count}</span>
+                </div>
+            `).join('');
+
+            // Update summary statistics
+            document.getElementById('total-items').textContent = rawScans.length;
+            document.getElementById('total-skus').textContent = consolidatedArray.length;
+        };
+
+        /**
+         * Attaches the Firestore listener for the currently selected location and user.
+         */
+        const setupInventoryListener = (locationId) => {
+            if (currentSnapshotUnsubscribe) {
+                currentSnapshotUnsubscribe(); // Detach old listener
+                rawScans = []; // Clear old data
+            }
+
+            if (!db || !userId || !locationId) {
+                document.getElementById('status-message').textContent = 'Waiting for location and auth...';
+                return;
+            }
+
+            const docRef = doc(db, 
+                `artifacts/${appId}/users/${userId}/inventory_audits`,
+                locationId
+            );
+
+            currentSnapshotUnsubscribe = onSnapshot(docRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    rawScans = docSnap.data().rawScans || [];
+                } else {
+                    rawScans = [];
+                }
+                renderInventory();
+            }, (error) => {
+                console.error("Firestore Listener Error: ", error);
+                document.getElementById('status-message').textContent = 'Error connecting to database.';
+            });
+            
+            document.getElementById('status-message').textContent = `Auditing: ${locationId.replace(/_/g, ' ')}`;
+        };
+
+        /**
+         * Handles the selection change for the location dropdown.
+         */
+        const handleLocationChange = () => {
+            const location = document.getElementById('location-select').value;
+            if (location && userId) {
+                setupInventoryListener(location);
+                localStorage.setItem('lastLocation', location);
+            }
+        };
+
+        /**
+         * Saves the current raw scan array state back to Firestore.
+         */
+        const saveInventory = async () => {
+            if (!db || !userId) {
+                console.error("Database or User not initialized.");
+                return;
+            }
+            const locationId = document.getElementById('location-select').value;
+            if (!locationId) {
+                console.warn("No location selected. Cannot save.");
+                return;
+            }
+
+            const docRef = doc(db, 
+                `artifacts/${appId}/users/${userId}/inventory_audits`,
+                locationId
+            );
+            
+            try {
+                await setDoc(docRef, { 
+                    rawScans: rawScans,
+                    location: locationId,
+                    lastUpdated: new Date().toISOString()
+                }, { merge: true });
+            } catch (e) {
+                console.error("Error saving document: ", e);
+                document.getElementById('status-message').textContent = 'Save Failed!';
+            }
+        };
+        
+        /**
+         * Clears all inventory data for the current location, with confirmation.
+         */
+        window.clearInventoryConfirmation = () => {
+            const clearButton = document.getElementById('clear-audit-button');
+            const locationId = document.getElementById('location-select').value;
+            const displayLocation = locationId.replace(/_/g, ' ');
+
+            if (rawScans.length === 0) {
+                 showMessage('Audit is already empty.', 'bg-stone-500');
+                 return;
+            }
+
+            if (clearButton.dataset.confirm === 'true') {
+                rawScans = [];
+                saveInventory();
+                
+                clearButton.dataset.confirm = 'false';
+                clearButton.classList.remove('bg-red-700', 'hover:bg-red-800');
+                clearButton.classList.add('bg-stone-600', 'hover:bg-stone-700');
+                
+                showMessage(`Audit for ${displayLocation} cleared!`, 'bg-amber-600');
+                
+                clearTimeout(clearConfirmationTimeout);
+                renderInventory();
+                
+            } else {
+                clearButton.dataset.confirm = 'true';
+                clearButton.textContent = 'TAP AGAIN TO CONFIRM CLEAR';
+                clearButton.classList.remove('bg-stone-600', 'hover:bg-stone-700');
+                clearButton.classList.add('bg-red-700', 'hover:bg-red-800');
+
+                clearConfirmationTimeout = setTimeout(() => {
+                    clearButton.dataset.confirm = 'false';
+                    clearButton.textContent = `Clear Audit (${displayLocation})`;
+                    clearButton.classList.remove('bg-red-700', 'hover:bg-red-800');
+                    clearButton.classList.add('bg-stone-600', 'hover:bg-stone-700');
+                }, 4000); // 4 seconds to confirm
+            }
+        };
+        
+        /**
+         * Utility to display a temporary message notification.
+         */
+        const showMessage = (message, colorClass) => {
+             const exportMessageElement = document.getElementById('export-message');
+             exportMessageElement.className = 'fixed top-4 left-1/2 transform -translate-x-1/2 p-3 text-white font-medium rounded-lg shadow-xl z-50 transition-all duration-300';
+             
+             exportMessageElement.textContent = message;
+             exportMessageElement.classList.add(colorClass);
+             exportMessageElement.classList.remove('hidden');
+
+             setTimeout(() => exportMessageElement.classList.add('hidden'), 3000);
+        }
+
+        /**
+         * Simulates a barcode scan and updates the inventory.
+         */
+        const handleScan = (sku) => {
+            if (!sku || sku.trim() === '') return;
+
+            // Reset clear confirmation if active
+            const clearButton = document.getElementById('clear-audit-button');
+            if (clearButton && clearButton.dataset.confirm === 'true') {
+                clearTimeout(clearConfirmationTimeout);
+                clearButton.dataset.confirm = 'false';
+                clearButton.classList.remove('bg-red-700', 'hover:bg-red-800');
+                clearButton.classList.add('bg-stone-600', 'hover:bg-stone-700');
+                clearButton.textContent = `Clear Audit (${document.getElementById('location-select').value.replace(/_/g, ' ')})`;
+            }
+
+            const trimmedSku = sku.trim().toUpperCase();
+            
+            rawScans.push({ 
+                sku: trimmedSku, 
+                timestamp: new Date().getTime() 
+            });
+            
+            saveInventory();
+
+            document.getElementById('scan-input').value = '';
+            document.getElementById('scan-input').focus();
+
+            // Provide visual feedback
+            const feedback = document.getElementById('scan-feedback');
+            feedback.textContent = `${trimmedSku}: +1`;
+            feedback.classList.remove('opacity-0', 'scale-50');
+            feedback.classList.add('opacity-100', 'scale-100');
+            
+            setTimeout(() => {
+                feedback.classList.remove('opacity-100', 'scale-100');
+                feedback.classList.add('opacity-0', 'scale-50');
+            }, 500);
+        };
+
+        // --- EXPORT LOGIC ---
+        const createRawScansCSV = () => {
+            const location = document.getElementById('location-select').value;
+            let csvContent = "Location,SKU,Scan Date/Time\n";
+            rawScans.forEach(scan => {
+                const scanTime = new Date(scan.timestamp).toLocaleString();
+                csvContent += `"${location}","${scan.sku}","${scanTime}"\n`;
+            });
+            return csvContent;
+        };
+
+        const createConsolidatedCSV = () => {
+            const location = document.getElementById('location-select').value;
+            const { consolidatedArray } = getConsolidatedData(rawScans);
+            const exportTimestamp = new Date().toLocaleString(); 
+            let csvContent = "Location,SKU,Count,Export Date/Time\n"; 
+            consolidatedArray.forEach(item => {
+                csvContent += `"${location}","${item.sku}",${item.count},"${exportTimestamp}"\n`;
+            });
+            return csvContent;
+        };
+        
+        const triggerDownload = (filename, csvContent) => {
+             const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+             const link = document.createElement("a");
+             if (link.download !== undefined) {
+                 const url = URL.createObjectURL(blob);
+                 link.setAttribute("href", url);
+                 link.setAttribute("download", filename);
+                 link.style.visibility = 'hidden';
+                 document.body.appendChild(link);
+                 link.click();
+                 document.body.removeChild(link);
+                 return true;
+             }
+             return false;
+        };
+
+        window.exportInventory = () => {
+            if (rawScans.length === 0) {
+                showMessage('Cannot export: Current audit is empty.', 'bg-red-500');
+                return;
+            }
+            
+            const location = document.getElementById('location-select').value;
+            const isoDate = new Date().toISOString().slice(0, 10);
+            
+            showMessage('1/2: Downloading RAW SCAN data...', 'bg-amber-600');
+
+            const rawCSV = createRawScansCSV();
+            const rawFilename = `RAW_Scans_${location}_${isoDate}.csv`;
+            triggerDownload(rawFilename, rawCSV);
+
+            setTimeout(() => {
+                showMessage('2/2: Downloading CONSOLIDATED COUNT data...', 'bg-amber-600');
+
+                const consolidatedCSV = createConsolidatedCSV();
+                const consolidatedFilename = `CONSOLIDATED_Count_${location}_${isoDate}.csv`;
+                triggerDownload(consolidatedFilename, consolidatedCSV);
+                
+                showMessage(`SUCCESS: Both files downloaded!`, 'bg-green-600');
+                
+            }, 1000); 
+        };
+        
+        // --- INITIALIZATION ---
+
+        window.onload = async () => {
+            try {
+                if (Object.keys(firebaseConfig).length === 0) {
+                     document.getElementById('status-message').textContent = 'Error: Firebase config missing.';
+                     return;
+                }
+                
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        document.getElementById('user-id-display').textContent = `User ID: ${userId}`;
+                        
+                        // Load custom locations and populate dropdown
+                        loadLocations(); 
+                        
+                        // Attach listeners to audit UI elements
+                        document.getElementById('location-select').addEventListener('change', handleLocationChange);
+                        document.getElementById('scan-button').addEventListener('click', () => {
+                            const sku = document.getElementById('scan-input').value;
+                            handleScan(sku);
+                        });
+                        document.getElementById('scan-input').addEventListener('keypress', (e) => {
+                            if (e.key === 'Enter') {
+                                e.preventDefault();
+                                const sku = e.target.value;
+                                handleScan(sku);
+                            }
+                        });
+                        
+                        // Render the starting view
+                        renderView('menu');
+                        
+                    } else {
+                        document.getElementById('status-message').textContent = 'Authentication Failed.';
+                    }
+                });
+
+            } catch (e) {
+                console.error("Initialization Error:", e);
+                document.getElementById('status-message').textContent = 'Initialization Failed: Check console for details.';
+            }
+        };
+    </script>
+    <style>
+        /* Custom styles for mobile-first aesthetics */
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #fffbeb; /* amber-50 - Beige background */
+            color: #44403c; /* stone-800 - Dark text */
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        main {
+            flex-grow: 1;
+            padding-bottom: 5rem; /* Space for the fixed footer */
+        }
+        .fixed-header {
+            top: 0;
+            left: 0;
+            right: 0;
+            z-index: 10;
+        }
+        .fixed-footer {
+            bottom: 0;
+            left: 0;
+            right: 0;
+            z-index: 10;
+        }
+        .view-screen {
+            min-height: calc(100vh - 4rem); /* Ensure views take up space */
+        }
+        /* Custom pulse animation for delete confirmation */
+        @keyframes pulse {
+          0%, 100% { opacity: 1; }
+          50% { opacity: .5; }
+        }
+        .animate-pulse {
+          animation: pulse 1s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Export Message Notification -->
+    <div id="export-message" class="hidden fixed top-4 left-1/2 transform -translate-x-1/2 p-3 text-white font-medium rounded-lg shadow-xl z-50 transition-all duration-300">
+        Message Here
+    </div>
+
+    <!-- Fixed Header: Menu Navigation -->
+    <header id="fixed-header" class="fixed-header bg-amber-900 shadow-xl p-3 border-b border-amber-600">
+        <div class="flex justify-between items-center max-w-lg mx-auto">
+             <h1 class="text-xl font-bold text-amber-100">SANDSTORM Kenya</h1>
+             <!-- Menu button visible on all views except the menu itself -->
+             <button id="menu-button" onclick="navigate('menu')" class="hidden bg-amber-800 hover:bg-amber-700 text-amber-100 font-semibold py-2 px-3 rounded-lg transition duration-150 active:scale-95 text-sm">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 inline-block mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" /></svg>
+                Menu
+            </button>
+        </div>
+        <p id="user-id-display" class="text-xs text-amber-500 text-center mt-1"></p>
+    </header>
+
+
+    <!-- Main Content Area: View Switcher Container -->
+    <main class="mt-[60px] p-4">
+        <div class="max-w-lg mx-auto">
+
+            <!-- 1. MAIN MENU VIEW -->
+            <div id="view-menu" class="view-screen flex flex-col justify-center items-center p-8 text-center hidden">
+                <h2 class="text-4xl font-extrabold text-amber-700 mb-8">Main Menu</h2>
+                <div class="w-full space-y-4">
+                    <button onclick="navigate('audit')" class="w-full bg-amber-700 hover:bg-amber-800 text-white font-bold py-5 px-6 rounded-xl text-xl shadow-lg transition duration-150 active:scale-[0.98]">
+                        Inventory Audit (Scan)
+                    </button>
+                    <button onclick="navigate('manage-locations')" class="w-full bg-stone-600 hover:bg-stone-700 text-white font-bold py-5 px-6 rounded-xl text-xl shadow-lg transition duration-150 active:scale-[0.98]">
+                        Manage Locations
+                    </button>
+                    <button onclick="exportInventory()" class="w-full bg-stone-400 hover:bg-stone-500 text-stone-900 font-bold py-5 px-6 rounded-xl text-xl shadow-lg transition duration-150 active:scale-[0.98]">
+                        Export Data (CSV)
+                    </button>
+                    <button onclick="window.close()" class="w-full bg-red-700 hover:bg-red-800 text-white font-bold py-5 px-6 rounded-xl text-xl shadow-lg transition duration-150 active:scale-[0.98]">
+                        Exit Application
+                    </button>
+                </div>
+            </div>
+
+            <!-- 2. INVENTORY AUDIT VIEW -->
+            <div id="view-audit" class="view-screen hidden">
+                
+                <h2 class="text-2xl font-bold text-amber-700 mb-4">Live Audit</h2>
+
+                <!-- Location Select & Clear -->
+                <div class="flex space-x-2 mb-6">
+                    <!-- Location Selector -->
+                    <select id="location-select" class="flex-grow bg-white text-stone-800 p-2 rounded-lg focus:ring-amber-500 focus:border-amber-500 shadow-inner border border-amber-200">
+                        <!-- Options populated by JS -->
+                    </select>
+                    
+                    <!-- Clear Audit Button -->
+                    <button 
+                        id="clear-audit-button" 
+                        onclick="clearInventoryConfirmation()" 
+                        data-confirm="false"
+                        class="bg-stone-600 hover:bg-stone-700 text-white font-semibold py-2 px-4 rounded-lg transition duration-150 shadow-md text-sm active:scale-95"
+                        disabled
+                    >
+                        Audit Empty
+                    </button>
+                </div>
+
+                <!-- Scan Input Area (Simulated Barcode Scanner) -->
+                <div class="bg-amber-100 p-4 rounded-xl shadow-2xl mb-6 border-4 border-amber-700">
+                    <p class="text-sm font-semibold text-amber-700 mb-2">Barcode Scanner (Enter SKU)</p>
+                    <div class="flex space-x-2">
+                        <input 
+                            type="text" 
+                            id="scan-input" 
+                            placeholder="Scan or type SKU here..." 
+                            class="flex-grow p-3 rounded-l-lg bg-white text-stone-800 placeholder-stone-500 focus:outline-none focus:ring-2 focus:ring-amber-500 text-lg font-mono border border-amber-300"
+                        />
+                        <button id="scan-button" class="bg-amber-700 hover:bg-amber-800 text-white font-bold py-3 px-4 rounded-r-lg transition duration-150 shadow-lg active:scale-95">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
+                            </svg>
+                        </button>
+                    </div>
+                    <!-- Visual Feedback -->
+                    <div id="scan-feedback" class="absolute mt-2 text-center w-full transform transition-all duration-300 opacity-0 scale-50 font-bold text-2xl text-amber-500">
+                        SKU: +1
+                    </div>
+                </div>
+
+                <!-- Audit Summary -->
+                <div class="flex justify-around bg-amber-900 p-4 rounded-xl shadow-inner mb-6 text-white">
+                    <div class="text-center">
+                        <p class="text-amber-300 text-sm">Total Items</p>
+                        <p id="total-items" class="text-3xl font-extrabold text-white">0</p>
+                    </div>
+                    <div class="text-center">
+                        <p class="text-amber-300 text-sm">Unique SKUs</p>
+                        <p id="total-skus" class="text-3xl font-extrabold text-white">0</p>
+                    </div>
+                </div>
+
+                <!-- Inventory List -->
+                <h3 class="text-xl font-semibold text-amber-800 mb-3">Current Count</h3>
+                <div id="inventory-list" class="space-y-2 max-h-96 overflow-y-auto pb-4">
+                    <p class="text-center text-stone-500 py-4">Loading data...</p>
+                </div>
+
+            </div>
+            
+            <!-- 3. MANAGE LOCATIONS VIEW (Add and Delete) -->
+            <div id="view-manage-locations" class="view-screen hidden pt-4">
+                <h2 class="text-3xl font-bold text-amber-700 mb-6">Manage Locations</h2>
+                
+                <!-- ADD LOCATION SECTION -->
+                <div class="bg-amber-100 p-6 rounded-xl shadow-2xl border-4 border-amber-500 mb-8 space-y-4">
+                    <h3 class="text-xl font-semibold text-amber-700">Add New Location</h3>
+                    <input 
+                        type="text" 
+                        id="new-location-input" 
+                        placeholder="New Location Name..." 
+                        class="w-full p-4 rounded-lg bg-white text-stone-800 placeholder-stone-500 focus:outline-none focus:ring-2 focus:ring-amber-500 text-lg border border-amber-300"
+                    />
+                    <button onclick="handleSaveNewLocation()" class="w-full bg-amber-700 hover:bg-amber-800 text-white font-bold py-4 rounded-lg text-xl shadow-lg transition duration-150 active:scale-95">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 inline-block mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" /></svg>
+                        Save & Start Audit
+                    </button>
+                </div>
+
+                <!-- DELETE LOCATION SECTION -->
+                <h3 class="text-2xl font-bold text-red-700 mb-4">Custom Locations (Delete)</h3>
+                <p class="text-sm text-stone-600 mb-3">Tap "Delete," then tap "CONFIRM DELETE?" to remove the location and ALL associated inventory data.</p>
+                
+                <div id="custom-location-list" class="space-y-2 pb-4">
+                    <p class="text-center text-stone-500 py-4">Loading custom locations...</p>
+                </div>
+            </div>
+
+        </div>
+    </main>
+
+    <!-- Fixed Footer: Export & Status (Visible only on Audit screen) -->
+    <footer id="fixed-footer" class="fixed-footer bg-amber-900 border-t border-amber-700 p-4 shadow-2xl hidden">
+        <div class="max-w-lg mx-auto">
+            <button onclick="exportInventory()" class="w-full bg-stone-600 hover:bg-stone-700 text-white font-bold py-4 px-6 rounded-xl text-xl shadow-2xl transition duration-150 active:scale-[0.98]">
+                <div class="flex items-center justify-center">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3v-1a3 3 0 00-3-3m11 0h1a3 3 0 013 3v1a3 3 0 01-3 3h-1" />
+                    </svg>
+                    Export Current Audit
+                </div>
+            </button>
+            <p id="status-message" class="text-center text-sm text-amber-300 mt-2">Initializing...</p>
+        </div>
+    </footer>
+
+</body>
+</html>
