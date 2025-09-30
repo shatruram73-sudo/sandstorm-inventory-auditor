@@ -1,0 +1,21 @@
+{
+"name": "SANDSTORM Inventory Auditor",
+"short_name": "Auditor",
+"description": "Real-time, offline-capable inventory scanning tool.",
+"start_url": "./index.html",
+"display": "standalone",
+"background_color": "#fffbeb",
+"theme_color": "#451a03",
+"icons": [
+{
+"src": "/android-chrome-192x192.png",
+"sizes": "192x192",
+"type": "image/png"
+},
+{
+"src": "/android-chrome-512x512.png",
+"sizes": "512x512",
+"type": "image/png"
+}
+]
+}
