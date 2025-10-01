@@ -652,12 +652,14 @@
             if (!firebaseConfig || !firebaseConfig.apiKey) {
                 console.warn("Environment config missing. Using local fallback.");
                 firebaseConfig = {
-                    apiKey: "YOUR_FIREBASE_API_KEY", // <-- REPLACE ME with your actual key
-                    authDomain: "your-project-id.firebaseapp.com",
-                    projectId: "your-project-id",
-                    storageBucket: "your-project-id.appspot.com",
-                    messagingSenderId: "your-sender-id",
-                    appId: "1:000000000000:web:000000000000000000000" // Your App ID
+                    firebaseConfig = {
+                    apiKey: "AIzaSyBRkM6e0bYJCjM9ZsQs_g-G971oQ0NkolQ",
+  		    authDomain: "sandstorm-inventory-auditor.firebaseapp.com",
+  		    projectId: "sandstorm-inventory-auditor",
+  		    storageBucket: "sandstorm-inventory-auditor.firebasestorage.app",
+  		    messagingSenderId: "251619777957",
+  		    appId: "1:251619777957:web:f3a09b3c346e1c40e01c4c",
+  		    measurementId: "G-THR73FJ9EN"
                 };
             }
             // --- END HARDCODED FALLBACK ---
